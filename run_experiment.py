@@ -45,11 +45,11 @@ class Reconstruction:
         # Reconstruct image
         return self.idwt((low, perturbed_details))
 
-def reduce_noise_livel(
-    x, model, device, psnr, desired_noiselevel=0.02, current_noiselevel=0.05, scales=3
+def reduce_noise_level(
+    x, model, device, psnr, desired_noiselevel=0.02, current_noiselevel=0.05, g = "tanhatanh
 ):
     # Initialize variables
-    psnr_ = [psnr(perturbed_output, perturbed_image).detach().cpu().numpy()]
+    psnr_ = [psnr(torch.clamp(perturbed_output,0,1), perturbed_image).detach().cpu().numpy()]
     attack_area_ = []
 
     qualitymeasure = 'psnr'
@@ -67,32 +67,53 @@ def reduce_noise_livel(
         print(current_noiselevel_)
 
         for krun in range(5):
-            noise_pattern_bk = [param.clone() for param in noise_pattern]
+            noise_pattern_bk = noise_pattern.clone()
+    
+            # Learn new noise mask
+            mask, mask_noise = noise_to_mask(smoothed_noise_pattern.clone())
+    
+            # Smooth the mask
+            mask = F.conv2d(mask, gaussian_filter_mask, padding=gaussian_filter_mask.shape[2] // 2, groups=x.shape[1])
+            mask /= mask.max()  # Normalize the smoothed mask to have values between 0 and 1
+    
+            # Plot the mask
+            # Plot the mask
+            #plt.figure(krun)
+            #plt.imshow(mask.squeeze().cpu().detach().numpy().transpose(1, 2, 0))
+            #plt.axis('off')
+            #plt.show()
+            #plt.pause(0.1)
+    
+            new_attack_area = sum(mask_noise.ravel())
+            print(f'Attack area {new_attack_area}')
+            attack_area_.append(new_attack_area)
 
-            (
-                perturbed_image,
-                perturbed_output,
-                smoothed_noise_pattern,
-                noise_pattern,
-            ) = new_maxdistortion(
-                x,
-                errbound=current_noiselevel_,
-                smoothfilter=None,
-                losstype=qualitymeasure,
-                l1_lambda=l1_lambda,
-                num_iterations=num_iterations,
-                model=model,
-                device=device,
-                mask=None,
-                initial_noise=noise_pattern,
-                learningrate=0.001,
-                scales=scales,
-            )
+        if new_attack_area == 0:
+            break
+        (
+            perturbed_image,
+            perturbed_output,
+            smoothed_noise_pattern,
+            noise_pattern,
+        ) = new_maxdistortion(
+            x,
+            errbound=current_noiselevel_,
+            smoothfilter=None,
+            losstype=qualitymeasure,
+            l1_lambda=l1_lambda,
+            num_iterations=num_iterations,
+            model=model,
+            device=device,
+            mask=mask,
+            initial_noise=noise_pattern,
+            learningrate=0.1,
+            g = "tanhatanh"
+        )
 
             psnr_k = psnr(perturbed_output, perturbed_image).detach().cpu().numpy()
 
             print(f"{psnr_k}")
-            psnr_.append(psnr_k)
+            psnr_.append(psnr(torch.clamp(perturbed_output,0,1), perturbed_image).detach().cpu().numpy())
 
             if psnr_k > 0:
                 last_positive_psnr_k = psnr_k
@@ -100,16 +121,14 @@ def reduce_noise_livel(
                 last_positive_params = {
                     "perturbed_image": perturbed_image.clone(),
                     "perturbed_output": perturbed_output.clone(),
-                    "smoothed_noise_pattern": [
-                        param.clone() for param in smoothed_noise_pattern
-                    ],
-                    "noise_pattern": [param.clone() for param in noise_pattern],
-                    "mask": None,
+                    'smoothed_noise_pattern': smoothed_noise_pattern.clone(),
+                    'noise_pattern': noise_pattern.clone(),
+                    'mask': mask.clone()
                     "current_noiselevel": current_noiselevel_,
                 }
 
             if psnr_k < 50:
-                noise_pattern = [param.clone() for param in noise_pattern_bk]
+                noise_pattern = noise_pattern_bk
                 current_noiselevel_ = last_positive_params["current_noiselevel"]
                 (
                     perturbed_image,
@@ -125,10 +144,10 @@ def reduce_noise_livel(
                     num_iterations=num_iterations,
                     model=model,
                     device=device,
-                    mask=None,
+                    mask=mask,
                     initial_noise=noise_pattern,
-                    learningrate=0.001,
-                    scales=scales,
+                    learningrate=0.1,
+                    g = "tanhatanh"
                 )
 
                 break
@@ -152,14 +171,15 @@ def reduce_noise_livel(
         perturbed_output,
         smoothed_noise_pattern,
         noise_pattern,
-        last_positive_params,
+        #last_positive_params,
         noise_pattern_bk,
-        psnr_,
+        mask,
+        psnr_
     )
-
+#spatial attack
 def maxdistortion_step(
     x, model, device, psnr, current_noiselevel, qualitymeasure, 
-    l1_lambda, num_iterations, scales, initial_noise=None, mask=None
+    l1_lambda, num_iterations, scales, initial_noise=None, mask=mask
 ):
     perturbed_image, perturbed_output, smoothed_noise_pattern, noise_pattern = \
         new_maxdistortion(
@@ -172,9 +192,9 @@ def maxdistortion_step(
             model=model,
             device=device,
             mask=mask,
-            initial_noise=initial_noise,
-            learningrate=0.001,
-            scales=scales
+            initial_noise=None,
+            learningrate=0.1,
+            g = "tanharctanh" 
         )
 
     psnr_1 = psnr(perturbed_output, perturbed_image).detach().cpu().numpy()
@@ -191,15 +211,84 @@ def maxdistortion_step(
                 device=device,
                 mask=mask,
                 initial_noise=noise_pattern,
-                learningrate=0.001,
-                scales=scales
+                learningrate=0.1,
+                g = "tanharctanh"
             )
 
         psnr_1 = psnr(perturbed_output, perturbed_image).detach().cpu().numpy()
 
-    return perturbed_image, perturbed_output, smoothed_noise_pattern, noise_pattern
-
+    return perturbed_image, perturbed_output, smoothed_noise_pattern, noise_pattern, mask
+    
 def shrink_step(x, device, perturbed_image, perturbed_output, scales, wavelet='haar'):
+    # Define the size and standard deviation of the Gaussian kernel
+    gaussian_filter_mask = create_gaussian_filter_mask(x,device)
+    residue = perturbed_output-perturbed_image
+    new_mask = mask_from_residue(residue)
+    psnr_1 = psnr(perturbed_output,perturbed_image).detach().cpu().numpy()
+    while psnr_1<100:
+        perturbed_image, perturbed_output, smoothed_noise_pattern, noise_pattern = \
+            new_maxdistortion(
+                x,
+                errbound=current_noiselevel,
+                smoothfilter=None,
+                losstype=qualitymeasure,
+                l1_lambda=0.0,
+                num_iterations=num_iterations,
+                model=model,
+                device=device,
+                mask=new_mask,
+                initial_noise=noise_pattern,
+                learningrate=0.1,
+                g = "tanharctanh"
+            )
+
+        psnr_1 = psnr(perturbed_output, perturbed_image).detach().cpu().numpy()
+    for krun in range(100):
+        noise_pattern_bk = noise_pattern.clone()
+        erroded_mask, eroded_mask_2d = create_erroded_mask(smoothed_noise_pattern)
+    
+        # plt.imshow(mask_noise)
+        #plt.figure(krun)
+        #plt.imshow(mask.squeeze().cpu().detach().numpy().transpose(1, 2, 0));
+        #plt.axis('off')
+        #plt.show
+        #plt.pause(0.1)
+        
+        new_attack_area = sum(eroded_mask_2d.ravel())
+        print(f'Attack area {new_attack_area}')
+        attack_area_.append(new_attack_area)
+    
+        if new_attack_area <= 10000:
+            break    
+    
+       # perturbed_image, perturbed_output, smoothed_noise_pattern, noise_pattern = \
+          #  maxdistortion_multiplicativenoise(x, sigma, gaussian_filter, qualitymeasure, l1_lambda, num_iterations, \
+              #            model, initial_noise=noise_pattern.clone(), mask= eroded_mask)
+        perturbed_image, perturbed_output, smoothed_noise_pattern, noise_pattern = \
+            new_maxdistortion(x, errbound=current_noiselevel, smoothfilter = None, losstype = 'psnr', l1_lambda=0, num_iterations=num_iterations, \
+                                          model=model, device=device, mask=eroded_mask,initial_noise=noise_pattern,learningrate=0.1,g="tanhatanh")
+        psnr_k = psnr(perturbed_output,perturbed_image).detach().cpu().numpy()
+        
+    
+        print(f'{psnr_k}')
+        psnr_.append(psnr_k)    
+    
+        if psnr_k<0:   #why not eroded mask?????
+            noise_pattern = noise_pattern_bk
+            #perturbed_image, perturbed_output, smoothed_noise_pattern, noise_pattern = \
+            #maxdistortion_multiplicativenoise(x, sigma, gaussian_filter, qualitymeasure, l1_lambda, num_iterations, \
+                        #  model, initial_noise=noise_pattern.clone(), mask= mask)
+            perturbed_image, perturbed_output, smoothed_noise_pattern, noise_pattern = \
+            new_maxdistortion(x, errbound=current_noiselevel, smoothfilter = None, losstype = 'psnr', l1_lambda=0, num_iterations=num_iterations, \
+                                          model=model, device=device, mask=eroded_mask,initial_noise=noise_pattern,learningrate=0.1,g="tanhatanh")
+            break
+    
+    return perturbed_image, perturbed_output, smoothed_noise_pattern, noise_pattern, new_mask
+    
+    
+
+
+def shrink_step_multiscale(x, device, perturbed_image, perturbed_output, scales, wavelet='haar'):
     # Define the size and standard deviation of the Gaussian kernel
     kernel_size = 5
     sigma_filter = 1.0
@@ -294,8 +383,8 @@ def defense(perturbed_image, model, device, psnr):
     for sigma in sigmas:
 
         perturbed_image_def, perturbed_output_def, smoothed_noise_pattern_def, noise_pattern_def= \
-            defend_maxdistortion_tanh(perturbed_image_nograd, sigma, None, 'psnr', \
-            l1_lambda, num_iterations, model, device=device, mask=None,initial_noise=None,learningrate = 0.1)
+            new_defend_maxdistortion(perturbed_image_nograd, sigma, None, 'psnr', \
+            l1_lambda, num_iterations, model, device=device, mask=None,initial_noise=None,learningrate = 0.1,g="tanhatanh")
         
         psnr_k = psnr(perturbed_output_def.clamp(0,1),perturbed_image_def.clamp(0,1))
         psnr_.append(psnr_k.detach().cpu().numpy())
@@ -305,9 +394,9 @@ def defense(perturbed_image, model, device, psnr):
     sigma = sigmas[ix]
     # sigma = 0.02
     perturbed_image_def, perturbed_output_def, smoothed_noise_pattern_def, noise_pattern_def= \
-        defend_maxdistortion_tanh(perturbed_image_nograd, sigma, None, 'psnr', \
-        l1_lambda, num_iterations, model, device=device, mask=None,initial_noise=None,learningrate = 0.1)
-
+            new_defend_maxdistortion(perturbed_image_nograd, sigma, None, 'psnr', \
+            l1_lambda, num_iterations, model, device=device, mask=None,initial_noise=None,learningrate = 0.1,g="tanhatanh")
+        
     psnr_k = psnr(perturbed_output_def,decompress_perturbed_image)
 
     return perturbed_image_def, perturbed_output_def, smoothed_noise_pattern_def, noise_pattern_def, psnr_k
@@ -326,7 +415,7 @@ def quantization(noise_pattern, x, model, sigma):
 
     quantized_perturbed_output = quantizedattack_output['x_hat']
 
-    return quantized_smoothed_noise_pattern, quantized_perturbed_image, quantized_perturbed_output
+    return  quantized_perturbed_image, quantized_perturbed_output,quantized_smoothed_noise_pattern, noise_pattern
 
 def run_experiment(args):
     image_path = args.image_path
@@ -378,7 +467,7 @@ def run_experiment(args):
     current_noiselevel = 0.05
     scales = 3
     perturbed_image, perturbed_output, smoothed_noise_pattern, noise_pattern, last_positive_params, noise_pattern_bk, psnr_ = \
-        reduce_noise_livel(
+        reduce_noise_level(
             x, model, device, psnr, desired_noiselevel, current_noiselevel, scales
         )
 
