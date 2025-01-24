@@ -178,7 +178,7 @@ def gaussian_kernel(size, sigma):
     # Create a 2D Gaussian kernel from the outer product of the vector with itself
     return g.outer(g)
 
-def gaussian_filter_mask(x,device):
+def create_gaussian_filter_mask(x,device):
     x = x.to(device)
     # Define the size and standard deviation of the Gaussian kernel
     kernel_size = 5
@@ -229,6 +229,9 @@ def addition_noise_torch(image_tensor, noise_tensor, device,g):
         return (x+e).to(device)
     elif g == 'additiont':
         return (x+torch.tanh(e)).to(device)
+    elif g == "logistic":
+        return (0.5*(1+torch.tanh((torch.log(x/(1-x))/2+e/2)))).to(device)
+    
     else:
         return x.to(device)
 
@@ -840,6 +843,190 @@ def maxdistortion(
 
 ###_______________________________________####
 
+def new_maxdistortion_multiscale(x, errbound=0.1, smoothfilter = None, losstype = 'psnr', l1_lambda=0, num_iterations=1000, \
+                                      model=None, device=None, mask=None,initial_noise=None,learningrate=0.1,scales = 1,g = "addition"):
+    # Multiscale  noise attack
+    # 
+    '''
+    \min_{n}  PSNR(x_{out},x_{in}) + \lambda  ||n||_1,     
+        s.t.   x_{out} = f(x_attack), |noise_{ij}|<= \sigma
+        
+    where x_attack = idwt(logexp(dwt(x)+noise))
+    #
+    Anh- Huy Phan
+    ''' 
+    #
+    #    
+    #
+    # x: input image of size 1 x C x H x W
+    # errbound: noise bound value
+    # smoothfilter: (gaussianfilter) filter for smoothing the noise pattern
+    # losstype: type of loss to use ('psnr' or 'ssmi')
+    # l1_lambda: weight for L1 regularization
+    # num_iterations: number of iterations to run the optimization
+    # model: the neural network model
+    # device: (optional) the device to run the optimization on (e.g., 'cuda:0')
+    # mask: (optional) binary mask to apply noise
+    #
+    # Anh-Huy Phan
+
+    # If no device is provided, use the device of the input tensor 'x'
+    if device is None:
+        device = x.device
+
+    # If no mask is provided, use a scalar value of 1 to apply noise uniformly
+    if mask is None:
+        mask = [torch.ones(1) for _ in range(scales+1)] 
+
+    # Move mask to the appropriate device
+    mask = [m.to(device).detach() for m in mask]
+
+
+    # Set default learning rate if not provided
+    if learningrate is None:
+        learningrate = 0.1
+         
+        
+    # Initialize components
+    wavelet = 'haar'
+    decomposer = MultiScaleDecomposition(wavelet=wavelet, device=device,scales = scales)
+    reconstructor = Reconstruction(wavelet=wavelet, device=device)
+
+    # Decompose input image
+    low, details = decomposer.decompose(x)
+    
+    # Initialize the noise pattern
+    if initial_noise is None:
+        # Generate random tensors matching the size of each 'details[k]'
+        detail_noise_pattern = [torch.nn.Parameter(torch.randn_like(detail) * mask[k+1]) for k, detail in enumerate(details)]
+        low_noise_pattern = torch.nn.Parameter(torch.randn_like(low)) 
+        
+        
+    else:
+        # Use provided initial noise scaled by mask
+        detail_noise_pattern = [torch.nn.Parameter(initial_noise[k+1].detach().clone() * mask[k+1]) for k in range(scales)]
+        low_noise_pattern = torch.nn.Parameter(initial_noise[0].detach().clone()) 
+        
+    # Combine all parameters into a single list
+    noise_pattern = [low_noise_pattern] + detail_noise_pattern
+
+
+    # Move noise_pattern tensors to the appropriate device
+    noise_pattern = [param.to(device) for param in noise_pattern]
+
+
+    # Optional: Print the shapes for verification
+    for k, param in enumerate(noise_pattern):
+        print(f"Scale {k} - Noise pattern shape: {param.shape}")
+
+    # Set error bound
+    delta = errbound
+
+
+    # Define optimizer 
+    optimizer = torch.optim.SGD(noise_pattern, lr=learningrate)
+
+    # Define the maximum possible pixel value of the image
+    MAX_I = 1.0
+
+    # Calculate the number of pixels
+    num_pixels = x.shape[0] * x.shape[2] * x.shape[3]
+    
+    
+#     low[:] = 0
+    
+    try:
+        
+        # Initialize lists to store masked noise patterns and perturbed details
+        smoothed_noise_pattern = [None] * (scales+1)  # List to hold masked noise patterns
+        perturbed_details = [None] * (scales)      # List to hold perturbed details
+#         perturbed_low = [None] *      # List to hold perturbed details
+
+        for iteration in range(num_iterations):
+            optimizer.zero_grad()
+            
+            for k in range(scales+1):
+                # Clamp the noise pattern values to ensure they stay within a valid range
+                noise_pattern[k].data.clamp_(-errbound, errbound)
+
+                # Apply masks to the clamped noise patterns, ensuring masks do not track gradients
+                smoothed_noise_pattern[k] = noise_pattern[k] * mask[k]
+
+                # Apply current noise pattern to the details
+                if k == 0:
+                    addition_noise_torch(low, smoothed_noise_pattern[k], low.device,g)
+                    perturbed_low = addition_noise_torch(low, smoothed_noise_pattern[k], low.device,g)
+                else:
+                    
+                    perturbed_details[k-1] = addition_noise_torch(details[k-1], smoothed_noise_pattern[k], details[k-1].device,g)
+            
+ 
+            # Reconstruct the perturbed image from the low-frequency component and perturbed details
+            perturbed_image = reconstructor.reconstruct(perturbed_low, perturbed_details)
+
+            
+            # Forward pass through the model
+            output = model(perturbed_image) 
+    
+            # output['x_hat'] for the reconstructed image
+            perturbed_output = output['x_hat']
+    
+            if losstype == 'psnr':
+                # Calculate MSE loss
+                mse_loss = F.mse_loss(perturbed_output, x)
+    
+                # Calculate PSNR loss
+                psnr_loss = 10 * torch.log10((MAX_I ** 2) / mse_loss)
+    
+                # maximize distortion = minimize PSNR
+                loss = psnr_loss  # Negative sign because we want to maximize PSNR
+    
+            elif losstype == 'ssim':
+                # maximize distortion = minimize 1-SSIM
+                ssim_perturbed = ssim(perturbed_output, x)
+    
+                loss = -ssim_perturbed  # Negative sign because we want to maximize SSIM
+    
+            elif losstype == 'dists':
+                
+                dists_perturbed = dists(x, perturbed_output)    
+                loss = -dists_perturbed    
+    
+            if l1_lambda>0:
+                # L1-norm for sparsity     
+                l1norm = smoothed_noise_pattern.abs().sum()
+                # Combine the loss with sparse L1 norm
+                combined_loss = loss + l1_lambda * l1norm  
+            else:
+                combined_loss = loss  
+    
+            
+            # Compute the bpp loss
+            bpploss = bpp_loss(output, num_pixels)
+    
+            # Perform gradient descent
+            combined_loss.backward()
+            optimizer.step()
+    
+
+            # Print the loss every 100 iterations
+            if iteration % 100 == 0:
+                # Optionally, increase alpha gradually
+                print(f'Iteration {iteration}, Loss: {loss.item()}, BPP {bpploss}')
+    
+ 
+    except KeyboardInterrupt:
+        # Save checkpoint on interruption
+        save_checkpoint({'noise_pattern': [tensor.detach().cpu().numpy() for tensor in noise_pattern], \
+                         'smoothed_noise_pattern': [tensor.detach().cpu().numpy() for tensor in smoothed_noise_pattern],\
+                         'perturbed_image': perturbed_image.data,\
+                         'perturbed_output': perturbed_output.data,\
+                         'iteration': iteration})
+        print("Interrupted, checkpoint saved.")
+        return perturbed_image, perturbed_output, smoothed_noise_pattern, noise_pattern
+
+    return perturbed_image, perturbed_output, smoothed_noise_pattern, noise_pattern
+ 
 
 def maxbitrate_v0(
     x,
@@ -999,6 +1186,71 @@ def noise_to_mask(smoothed_noise_pattern):
     mask[:, :, nnz_ix[0], nnz_ix[1]] = 1
 
     return mask, mask_noise
+    
+def mask_from_residue(residue):
+    new_mask = torch.zeros_like(residue)
+    residue_shape = residue.shape
+    gaussian_filter_mask = create_gaussian_filter_mask(residue,residue.device)
+    residue = F.conv2d(residue, gaussian_filter_mask, padding=gaussian_filter_mask.shape[2]//2,groups=x.shape[1])
+    residue = F.conv2d(residue, gaussian_filter_mask, padding=gaussian_filter_mask.shape[2]//2,groups=x.shape[1])
+
+    ell2_noise = torch.sqrt(torch.sum(residue**2,dim = 1));
+
+    mask_noise = ell2_noise>.5#torch.max(ell2_noise) * 1e-1
+    mask_noise = mask_noise.squeeze()
+
+    mask_noise = mask_noise.cpu().detach().numpy()
+    mask_noise = opening(mask_noise, square(10))
+    mask_noise = dilation(mask_noise, square(30))
+    # mask_noise = dilation(mask_noise, square(5))
+    mask_noise = opening(mask_noise, square(30))
+    # Expand the local region in new_mask_noise to cover the noise region in the original mask
+    expanded_mask = dilation(mask_noise, square(40))  # Adjust the size of the square as needed
+    
+    # Combine the expanded mask with the original mask
+    mask_logical = mask[0, 0, :, :].cpu().detach().numpy().astype(bool)
+    
+    # Combine the expanded final mask with the original mask
+    final_mask = np.logical_and(mask_logical, expanded_mask)
+    # plt.imshow(mask_noise)
+
+    # Mask 3D 
+    
+    nnz_ix = np.where(final_mask==True)
+    new_mask[:,:,nnz_ix[0],nnz_ix[1]] = 1
+    
+    # new_mask,new_2dmask = noise_to_mask(residue)
+    new_mask = F.conv2d(new_mask, gaussian_filter_mask, padding=gaussian_filter_mask.shape[2]//2,groups=x.shape[1])
+
+    # new_mask,new_2dmask = noise_to_mask(residue)
+    new_mask = F.conv2d(new_mask, gaussian_filter_mask, padding=gaussian_filter_mask.shape[2]//2,groups=residue_shape[1])
+
+    return new_mask
+
+def create_erroded_mask(smoothed_noise_pattern):
+    mask,mask_noise = noise_to_mask(smoothed_noise_pattern.clone())
+
+    # # Smooth the mask 
+    # mask = F.conv2d(mask, gaussian_filter_mask, padding=gaussian_filter_mask.shape[2]//2,groups=x.shape[1])
+    # # Normalize the smoothed mask to have values between 0 and 1
+    # mask /= mask.max()
+     
+    # 'selem' is the structuring element; disk(5) creates a disk-shaped element with radius 5
+    selem = disk(5)
+      
+    # Add batch and channel dimensions to the 2D mask
+    mask_2d = mask[0, 0].detach().cpu().numpy()
+    mask_2d = (mask_2d > 0.5).astype(np.uint8)
+    
+    # Apply 2D convolution to perform erosion
+    eroded_mask_2d = erosion(mask_2d, selem)
+    
+    # Convert the NumPy array back to a PyTorch tensor
+    eroded_mask = mask.clone()
+    eroded_mask[:,0,:,:] = torch.tensor(eroded_mask_2d)
+    eroded_mask[:,1,:,:] = torch.tensor(eroded_mask_2d)
+    eroded_mask[:,2,:,:] = torch.tensor(eroded_mask_2d)
+    return eroded_mask, eroded_mask_2d
 
 
 # Function to save state
@@ -1523,7 +1775,7 @@ def eval_perf_full(model, net, y, x,img_path):
 
 #### Defense
 
-def defend_maxdistortion_tanh(x, errbound, smoothfilter, losstype, l1_lambda, num_iterations, model, device=None, mask=None,initial_noise=None,learningrate = 0.1):
+def new_defend_maxdistortion(x, errbound, smoothfilter, losstype, l1_lambda, num_iterations, model, device=None, mask=None,initial_noise=None,learningrate = 0.1,g="tanhatanh"):
     '''
     \min_{n}  PSNR(x_{out} - x_{in}) + \lambda  ||n||_1,     
         s.t.   x_{out} = f(x_{in} + n), |n_{ij}|<= \sigma
@@ -1586,7 +1838,7 @@ def defend_maxdistortion_tanh(x, errbound, smoothfilter, losstype, l1_lambda, nu
             smoothed_noise_pattern = noise_pattern2 * mask
     
             # Apply current noise pattern
-            perturbed_image = x + smoothed_noise_pattern
+            perturbed_image = addition_noise_torch(x, smoothed_noise_pattern,device,g)
             
             # perturbed_image = torch.log(torch.exp(x) + smoothed_noise_pattern)
     
