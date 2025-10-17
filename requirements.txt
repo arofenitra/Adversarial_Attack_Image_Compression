@@ -1,0 +1,43 @@
+# Core deep learning framework
+torch>=1.9.0
+torchvision>=0.10.0
+
+# AI image compression
+compressai[full]>=1.2.0
+
+# Numerical computing
+numpy<2.0.0
+
+# Image processing
+Pillow>=8.0.0
+
+# Visualization
+matplotlib>=3.3.0
+
+# Computer vision utilities
+kornia>=0.6.0
+
+# Additional utilities
+pathlib2>=2.3.0; python_version < "3.4"
+argparse; python_version < "3.2"
+
+# Optional: Jupyter notebook support
+jupyter>=1.0.0
+ipykernel>=6.0.0
+ipywidgets>=7.6.0
+
+# Optional: Enhanced visualization
+seaborn>=0.11.0
+plotly>=5.0.0
+
+# Optional: Progress bars
+tqdm>=4.60.0
+
+# Optional: Image quality metrics
+scikit-image>=0.18.0
+lpips>=0.1.4
+
+# Development dependencies (optional)
+pytest>=6.0.0
+black>=21.0.0
+flake8>=3.9.0
