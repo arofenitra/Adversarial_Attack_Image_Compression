@@ -24,7 +24,7 @@ The project demonstrates how adversarial examples can degrade the performance of
 
 1. Clone the repository:
 ```bash
-git clone <repository-url>
+git clone https://github.com/arofenitra/Adversarial_Attack_Image_Compression 
 cd Adversarial_Attack_Image_Compression
 ```
 
